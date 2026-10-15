@@ -76,7 +76,9 @@ Keep `banned.sh` and the profile directory **outside every project tree**, owned
 ```bash
 install -d -m 755 ~/.local/share/banned ~/.config/banned/profiles
 install -m 644 banned.sh ~/.local/share/banned/banned.sh
-echo 'source ~/.local/share/banned/banned.sh' >> ~/.bash_func   # or ~/.bashrc
+LINE='source ~/.local/share/banned/banned.sh'
+grep -qxF "$LINE" ~/.bash_func 2>/dev/null || echo "$LINE" >> ~/.bash_func   # or ~/.bashrc; safe to re-run
+source ~/.bash_func && banned --version
 ```
 
 Sourcing the file only defines the `banned` function and runs nothing. You can also execute it directly, which runs the scan and exits with the same status as the function. That needs the exec bit, which the `install -m 644` above does not set:
@@ -87,6 +89,25 @@ install -m 755 banned.sh ~/.local/share/banned/banned.sh
 ```
 
 The profile directory is fixed at `~/.config/banned/profiles` and is assigned unconditionally in `banned.sh`; it is not read from the environment, so a stray variable cannot redirect where rules are loaded from.
+
+## Upgrading
+
+From the repo, after pulling the new version:
+
+```bash
+D=~/.local/share/banned
+bash test_banned.sh && bash smoke_test.sh                  # as a normal user, before touching the install
+cp -p "$D/banned.sh" "$D/banned.sh.prev"                   # rollback copy
+install -m 644 banned.sh "$D/banned.sh.new" && mv -f "$D/banned.sh.new" "$D/banned.sh"
+BANNED_SMOKE_SRC="$D/banned.sh" bash smoke_test.sh \
+  || { mv -f "$D/banned.sh.prev" "$D/banned.sh"; echo "rolled back"; }
+source ~/.bash_func && banned --version
+```
+
+- The copy goes to a temporary name and is then moved into place, so an interrupted upgrade cannot leave a half-written `banned.sh` that your shell sources.
+- The smoke test runs against the *installed* file. If it fails, the previous copy is restored.
+- **An already-open shell keeps the old function** until you `source ~/.bash_func` again (or open a new shell). `banned --version` in that shell reports the old version. `bash ~/.local/share/banned/banned.sh --version` reports what is on disk.
+- Upgrading never touches your profiles in `~/.config/banned/profiles/`; they are your data. Check the changelog for a rule or profile-format change before assuming an old profile still matches.
 
 ## Rules
 
@@ -237,4 +258,4 @@ The tests were written first and run against a deliberately broken stand-in that
 | `smoke_test.sh` | Runs `banned` over `fixtures/`; can target an installed copy. |
 | `fixtures/` | Inert sample files for every rule, plus controls, false positives and known gaps. |
 | `CHANGELOG.md` | Version history, including the bug fixes. |
-| `network.rules.example` | Example profile banning network use. |
+| `planner.rules.example` | Example profile banning network use. |
