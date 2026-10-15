@@ -17,8 +17,6 @@ When an agent writes code inside a project directory, the person reviewing it ne
 
 `banned` is built around those failure modes. The rule is simple: **anything unexpected is an error, never "clean".**
 
-- It is not a substitute for good code review. It is merely an automation I use to handle the "naive" checks. 
-
 ## Example
 
 ```console
@@ -57,6 +55,7 @@ banned [-p PROFILE] [PATH]
 |---|---|
 | `PATH` | Directory (or file) to scan. Defaults to `.`. An **empty** string is an error, not `.`. |
 | `-p PROFILE` | Also load extra rules from `PROFILE.rules` (see [Profiles](#profiles)). Adds to the global list, never replaces it. |
+| `--version` | Print `banned X.Y.Z` and exit `0`. Scans nothing. See [Versioning](#versioning). |
 
 Scope: Python only (`*.py`). `__pycache__` and `.git` directories are skipped. Binary files are skipped.
 
@@ -78,6 +77,13 @@ Keep `banned.sh` and the profile directory **outside every project tree**, owned
 install -d -m 755 ~/.local/share/banned ~/.config/banned/profiles
 install -m 644 banned.sh ~/.local/share/banned/banned.sh
 echo 'source ~/.local/share/banned/banned.sh' >> ~/.bash_func   # or ~/.bashrc
+```
+
+Sourcing the file only defines the `banned` function and runs nothing. You can also execute it directly, which runs the scan and exits with the same status as the function. That needs the exec bit, which the `install -m 644` above does not set:
+
+```bash
+install -m 755 banned.sh ~/.local/share/banned/banned.sh
+~/.local/share/banned/banned.sh [-p PROFILE] [PATH]
 ```
 
 The profile directory is fixed at `~/.config/banned/profiles` and is assigned unconditionally in `banned.sh`; it is not read from the environment, so a stray variable cannot redirect where rules are loaded from.
@@ -127,7 +133,7 @@ A profile is extra rules for one project, stored as `~/.config/banned/profiles/N
 banned -p planner ~/projects/planner
 ```
 
-`planner.rules.example` shows a profile that bans network use for a project that must stay offline.
+`planner.rules.example` is a ready-to-use profile that bans network use (`socket`, `urllib`, `http.client`) for a project that must stay offline. It also lists a few optional rules, disabled, that you can enable by removing the leading `# `. Its known noise is noted in the file: `urllib` also matches the offline-safe `urllib.parse`.
 
 Profile names are restricted to letters, digits, `_` and `-`, so `-p ../x` cannot walk out of the profile directory. A missing, unreadable, empty, or comments-only profile is an error (`2`), never "clean": a profile that silently loads nothing would give a false sense of coverage.
 
@@ -138,6 +144,7 @@ Profile names are restricted to letters, digits, `_` and `-`, so `-p ../x` canno
 - **Error beats hit.** A result you cannot trust is reported as such, even when something also matched.
 - **`LC_ALL=C` on the `grep` call.** See the finding below.
 - **Symlinks are reported, not silently skipped.** See below.
+- **Executing the file runs the scan.** An earlier version only defined the function, so `./banned.sh DIR` printed nothing and exited `0`: a silent pass from a tool built to fail closed. Found by using it, not by the tests, which only ever sourced it. The file now checks whether it is being sourced or executed and behaves accordingly, and the suite exercises both paths.
 - **Output is safe to read.** Symlink names are printed with `printf %q`, so a hostile file name cannot forge output lines or inject terminal escape sequences.
 
 ### Finding: `grep -I` can silently drop a match in a UTF-8 locale
@@ -177,6 +184,17 @@ Read these before trusting it.
 - **Trust is enforced by file permissions, not by the script.** `banned` does not check that its rule files are unwritable by the agent.
 - **Per-rule `grep` passes.** One pass over the tree per rule. Fine for project-sized trees; an unreadable directory prints its error once per rule.
 
+## Versioning
+
+```console
+$ banned --version
+banned 0.3.1
+```
+
+[Semantic Versioning](https://semver.org/), pre-1.0. The version lives in one place (`BANNED_VERSION` in `banned.sh`), and [CHANGELOG.md](CHANGELOG.md) records every change. The test suite fails if the changelog's newest entry and `banned --version` disagree.
+
+Worth knowing if you used an early copy: **before 0.2.1, running the file as a command (`./banned.sh DIR`) printed nothing and exited `0`.** Sourcing it and calling `banned` was never affected. Treat any `0` from that invocation on an older copy as "no scan happened", not "clean". Details are in the changelog.
+
 ## Requirements
 
 Linux, bash 4.4+ (`mapfile -d`), GNU grep, GNU find (`-H`, `-xtype`). Developed and tested on bash 5.2, grep 3.11, findutils 4.9, Python 3.13.
@@ -193,6 +211,18 @@ Plain bash, no framework. Each case builds a scratch tree under `mktemp -d` from
 - Tests that depend on file permissions (unreadable directory, unreadable profile) **skip loudly when run as root**, because permission bits are not enforced for root. Run the suite as a normal user for full coverage.
 - Includes a coverage check: a rule added to `banned.sh` fails the suite until it has a sample line in the test file, so no rule ships without being seen to fire.
 - Runs `bash -n` and `shellcheck` if available.
+- The runner fails closed too: if it stops before printing its summary, for any reason, it exits `2` with a "NOT a pass" message instead of a silent `0`.
+
+### Sample files and smoke test
+
+`fixtures/` holds small **inert** Python files: one per shipped rule, one per network-profile rule, clean controls, known false positives, and known evasions the tool does not catch. `smoke_test.sh` runs `banned` over them, both as the sourced function and as the executed file, and checks the results.
+
+```bash
+bash smoke_test.sh                                                      # the copy in this repo
+BANNED_SMOKE_SRC=~/.local/share/banned/banned.sh bash smoke_test.sh     # your installed copy
+```
+
+The second form is the useful one: it checks that the copy you actually installed behaves, not just the code in the repo. Rules and fixtures are checked in both directions, so a rule with no sample file fails, and so does a sample file with no rule. The known-gap fixtures are pinned: if `banned` starts catching one, the smoke test says so and you update the docs. See [fixtures/README.md](fixtures/README.md). The smoke test found a real bug on its first run (see 0.3.1 in the changelog).
 
 ### How it was developed
 
@@ -202,6 +232,9 @@ The tests were written first and run against a deliberately broken stand-in that
 
 | File | Purpose |
 |---|---|
-| `banned.sh` | The function, the rule list, the design notes. Source it; do not execute it. |
+| `banned.sh` | The function, the rule list, the design notes. Source it to get the function, or execute it to run a scan. |
 | `test_banned.sh` | Test suite. |
-| `planner.rules.example` | Example profile banning network use. |
+| `smoke_test.sh` | Runs `banned` over `fixtures/`; can target an installed copy. |
+| `fixtures/` | Inert sample files for every rule, plus controls, false positives and known gaps. |
+| `CHANGELOG.md` | Version history, including the bug fixes. |
+| `network.rules.example` | Example profile banning network use. |

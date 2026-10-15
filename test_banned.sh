@@ -17,8 +17,22 @@ PASS=0
 FAIL=0
 SKIP=0
 SCRATCH=$(mktemp -d) || { echo "cannot create scratch dir" >&2; exit 2; }
-# chmod first: the unreadable-directory tests leave mode-000 dirs behind.
-trap 'chmod -R u+rwx "$SCRATCH" 2>/dev/null; rm -rf "$SCRATCH"' EXIT
+COMPLETED=0
+cleanup() {
+  local rc=$?
+  # chmod first: the unreadable-directory tests leave mode-000 dirs behind.
+  chmod -R u+rwx "$SCRATCH" 2>/dev/null
+  rm -rf "$SCRATCH"
+  # A run that dies before the summary must never look like a pass. Sourcing
+  # the code under test must not call exit, but if it ever does (a broken
+  # source/execute guard once did exactly that, exiting 0 with no output)
+  # this turns it into a failure instead of a silent green.
+  if (( ! COMPLETED )); then
+    echo "test_banned.sh: stopped before the summary (status $rc): this is NOT a pass" >&2
+    exit 2
+  fi
+}
+trap cleanup EXIT
 
 # ---- tiny harness ----------------------------------------------------------
 
@@ -216,6 +230,17 @@ else
   out_has "hit.py"
   chmod 755 "$T/locked"
 fi
+
+begin "a single FILE as the path still reports file:line:text"
+# Regression: grep -r omits the file name when its only operand is a file, so
+# the report used to read "2:import pickle" with no file. -H forces it.
+mkfile "$T/one.py" $'x = 1\nimport pickle'
+run banned "$T/one.py"
+is_rc 1
+out_has "one.py:2:import pickle"
+run bash "$SRC" "$T/one.py"
+is_rc 1 "executed directly"
+out_has "one.py:2:import pickle"
 
 begin "nonexistent path"
 run banned "$T/nope"
@@ -468,6 +493,89 @@ for nm in '../evil' 'a/b' '' 'has space' '.hidden'; do
   out_lacks "clean"
 done
 
+# ---- 11b. executed directly vs sourced --------------------------------------
+# Regression: running ./banned.sh used to define the function, call nothing,
+# print nothing and exit 0. For a fail-closed tool that is a silent pass.
+# Executed => behave as the command, exit status passed through.
+# Sourced  => define the function and run nothing.
+
+begin "executed directly: runs the scan and passes the exit status through"
+mkfile "$T/dirty/a.py" 'import pickle'
+mkfile "$T/clean/a.py" 'x = 1'
+run bash "$SRC" "$T/dirty"
+is_rc 1 "dirty tree"
+out_has "RULE pickle:"
+err_has "BANNED CALLS FOUND"
+run bash "$SRC" "$T/clean"
+is_rc 0 "clean tree"
+out_is "clean"
+run bash "$SRC" "$T/nope"
+is_rc 2 "nonexistent path"
+out_lacks "clean"
+run_in "$T/dirty" bash "$SRC"
+is_rc 1 "no argument means ."
+
+begin "executed as ./banned.sh (shebang and exec bit), not via bash"
+mkfile "$T/dirty/a.py" 'import pickle'
+cp "$SRC" "$SCRATCH/banned-exec.sh"
+chmod +x "$SCRATCH/banned-exec.sh"
+run "$SCRATCH/banned-exec.sh" "$T/dirty"
+is_rc 1
+out_has "RULE pickle:"
+first=$(head -1 "$SCRATCH/banned-exec.sh")
+if [[ $first == '#!'*bash* ]]; then ok "$CASE: first line is a bash shebang"
+else bad "$CASE: first line is a bash shebang" "first line: $first"; fi
+
+begin "executed directly: profile from the default location under \$HOME"
+mkfile "$T/n/a.py" 'import socket'
+mkdir -p "$SCRATCH/home/.config/banned/profiles"
+printf 'socket::socket::offline project\n' > "$SCRATCH/home/.config/banned/profiles/planner.rules"
+HOME="$SCRATCH/home" run bash "$SRC" -p planner "$T/n"
+is_rc 1
+out_has "RULE socket: offline project"
+HOME="$SCRATCH/home" run bash "$SRC" "$T/n"
+is_rc 0 "without -p the profile is not applied"
+
+begin "sourced: defines the function and runs nothing (even in a dirty cwd)"
+mkfile "$T/dirty/a.py" 'import pickle'
+# Single quotes on purpose: $1 must expand in the inner bash, not in this shell.
+# shellcheck disable=SC2016
+run_in "$T/dirty" bash -c 'source "$1" && declare -F banned >/dev/null && echo defined' _ "$SRC"
+is_rc 0
+out_is "defined"
+
+# ---- 11c. versioning --------------------------------------------------------
+# The version lives in one place (BANNED_VERSION in banned.sh), is shown by
+# `banned --version`, and CHANGELOG.md's newest entry must match it so one
+# cannot be bumped without the other.
+
+CHANGELOG="${BANNED_CHANGELOG:-$(dirname "$SRC")/CHANGELOG.md}"
+VER_RE='^banned [0-9]+\.[0-9]+\.[0-9]+$'
+
+begin "--version prints 'banned X.Y.Z', scans nothing, exits 0"
+mkfile "$T/dirty/a.py" 'import pickle'
+run_in "$T/dirty" banned --version
+is_rc 0 "function"
+if [[ $out =~ $VER_RE ]]; then ok "$CASE: function output looks like 'banned X.Y.Z' ($out)"
+else bad "$CASE: function output looks like 'banned X.Y.Z'" "stdout=[$out] stderr=[$err]"; fi
+out_lacks "RULE"
+out_lacks "clean"
+run bash "$SRC" --version
+is_rc 0 "executed directly"
+if [[ $out =~ $VER_RE ]]; then ok "$CASE: executed output looks like 'banned X.Y.Z' ($out)"
+else bad "$CASE: executed output looks like 'banned X.Y.Z'" "stdout=[$out] stderr=[$err]"; fi
+
+begin "CHANGELOG.md newest entry matches the version banned reports"
+if [[ ! -r $CHANGELOG ]]; then
+  bad "$CASE: CHANGELOG.md exists" "not found: $CHANGELOG"
+else
+  top=$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' "$CHANGELOG" | tr -d '#[] ')
+  run banned --version
+  if [[ -z $top ]]; then bad "$CASE: changelog has a '## [X.Y.Z]' heading" "none found in $CHANGELOG"
+  elif [[ $out == "banned $top" ]]; then ok "$CASE: both say $top"
+  else bad "$CASE: both say the same version" "changelog top=[$top] banned reports=[$out]"; fi
+fi
+
 # ---- 12. static checks ------------------------------------------------------
 
 CASE="static"
@@ -482,5 +590,6 @@ fi
 
 # ---- summary ----------------------------------------------------------------
 
+COMPLETED=1
 printf '\n%d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
 (( FAIL == 0 ))

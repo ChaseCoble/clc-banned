@@ -1,0 +1,26 @@
+# Example profile for: banned -p planner
+# Install as ~/.config/banned/profiles/planner.rules (owned by the account that
+# runs the check, NOT inside the project tree, not writable by the agent's user):
+#
+#   install -m 644 planner.rules.example ~/.config/banned/profiles/planner.rules
+#
+# Same record format as BANNED_RULES in banned.sh:  name::regex::reason
+# Blank lines and '#' in column 0 are skipped. These ADD to the global rules.
+# A profile with no active rules is an error (exit 2), never "clean".
+#
+# Network use is banned for the planner by its CLAUDE.md. As with the global
+# rules, mentions in comments and lookalikes will also match; that is intended.
+# Known noise: urllib also matches urllib.parse, which never touches the
+# network, and socket also matches websocket and socketserver.
+socket::socket::raw network access (planner must stay offline)
+urllib::urllib::HTTP client (planner must stay offline)
+http-client::http\.client::HTTP client (planner must stay offline)
+
+# Optional, NOT enabled. Remove the leading '# ' from a line to ban it too.
+# Each active line needs a matching sample file in fixtures/network/ (named
+# after the rule) or smoke_test.sh will fail.
+# requests::requests\.::third-party HTTP client
+# httpx::httpx::third-party HTTP client
+# aiohttp::aiohttp::third-party async HTTP client
+# ftplib::ftplib::FTP client
+# smtplib::smtplib::SMTP client
